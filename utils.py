@@ -331,3 +331,48 @@ def load_checkpoint(checkpoint, model, optimizer):
     print("=> Loading checkpoint")
     model.load_state_dict(checkpoint["state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer"])
+
+
+def plot_image_with_labels(image, ground_truth_boxes, predicted_boxes, class_mapping):
+
+    inverted_class_mapping = {v: k for k, v in class_mapping.items()}
+
+    im = np.array(image)
+    height, width, _ = im.shape
+
+    fig, ax = plt.subplots(1)
+    ax.imshow(im)
+
+    for box in ground_truth_boxes:
+        label_index, box = box[0], box[2:]
+        upper_left_x = box[0] - box[2] / 2
+        upper_left_y = box[1] - box[3] / 2
+        rect = patches.Rectangle(
+            (upper_left_x * width, upper_left_y * height),
+            box[2] * width,
+            box[3] * height,
+            linewidth=1,
+            edgecolor="green",
+            facecolor="none",
+        )
+        ax.add_patch(rect)
+        class_name = inverted_class_mapping.get(label_index, "Unknown")
+        ax.text(upper_left_x * width, upper_left_y * height, class_name, color='white', fontsize=12, bbox=dict(facecolor='green', alpha=0.2))
+
+    for box in predicted_boxes:
+        label_index, box = box[0], box[2:]
+        upper_left_x = box[0] - box[2] / 2
+        upper_left_y = box[1] - box[3] / 2
+        rect = patches.Rectangle(
+            (upper_left_x * width, upper_left_y * height),
+            box[2] * width,
+            box[3] * height,
+            linewidth=1,
+            edgecolor="r",
+            facecolor="none",
+        )
+        ax.add_patch(rect)
+        class_name = inverted_class_mapping.get(label_index, "Unknown")
+        ax.text(upper_left_x * width, upper_left_y * height, class_name, color='white', fontsize=12, bbox=dict(facecolor='red', alpha=0.2))
+
+    plt.show()
