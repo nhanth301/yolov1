@@ -56,22 +56,26 @@ def train_fn(train_loader, model, optimizer, loss_fn, epoch):
 
     return avg_mAP
 
-
-def test_fn(test_loader, model, loss_fn, epoch):
+from tqdm import tqdm
+def test_fn(test_loader, model, loss_fn):
     model.eval()
     mean_loss = []
     mean_mAP = []
 
-    for batch_idx, (x, y) in enumerate(test_loader):
+    loop = tqdm(test_loader, desc="Testing", leave=False)
+
+    for batch_idx, (x, y) in enumerate(loop):
         x, y = x.to(DEVICE), y.to(DEVICE)
         out = model(x)
         loss = loss_fn(out, y)
 
         pred_boxes, true_boxes = get_bboxes_training(out, y, iou_threshold=0.5, threshold=0.4)
-        mAP = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, box_format="midpoint")
+        mAP = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.75, box_format="midpoint")
 
         mean_loss.append(loss.item())
         mean_mAP.append(mAP.item())
+
+        loop.set_postfix(loss=loss.item(), mAP=mAP.item())
 
     avg_loss = sum(mean_loss) / len(mean_loss)
     avg_mAP = sum(mean_mAP) / len(mean_mAP)
