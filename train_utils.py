@@ -4,7 +4,8 @@ from albumentations.pytorch import ToTensorV2
 from config import WIDTH, HEIGHT, DEVICE
 from termcolor import colored
 from utils import get_bboxes_training, mean_average_precision
-
+import onnxruntime
+import torch
 
 def get_train_transforms():
     return A.Compose([A.OneOf([A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit= 0.2, val_shift_limit=0.2, p=0.9),
@@ -84,3 +85,49 @@ def test_fn(test_loader, model, loss_fn):
     model.train()
 
     return avg_mAP
+
+
+def test_fn_onnx(test_loader, onnx_model_path, loss_fn):
+    try:
+        session = onnxruntime.InferenceSession(onnx_model_path, providers=['CPUExecutionProvider'])
+    except Exception as e:
+        print(f"Error loading ONNX model: {e}")
+        return e
+
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    print(f"ONNX Model '{onnx_model_path}' loaded for testing.")
+    print(f"Input Name: {input_name}, Output Name: {output_name}")
+
+    mean_loss = []
+    mean_mAP = []
+
+    loop = tqdm(test_loader, desc="Testing ONNX", leave=False)
+
+    for batch_idx, (x, y) in enumerate(loop):
+        x_cpu = x.to("cpu") 
+        input_np = x_cpu.numpy()
+
+        outputs = session.run([output_name], {input_name: input_np})
+        
+        out_np = outputs[0]
+
+        out = torch.from_numpy(out_np).to(DEVICE)
+    
+        loss = loss_fn(out, y)
+
+        pred_boxes, true_boxes = get_bboxes_training(out, y, iou_threshold=0.5, threshold=0.4)
+        mAP = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.75, box_format="midpoint")
+
+        mean_loss.append(loss.item())
+        mean_mAP.append(mAP.item())
+
+        loop.set_postfix(loss=loss.item(), mAP=mAP.item())
+
+    avg_loss = sum(mean_loss) / len(mean_loss)
+    avg_mAP = sum(mean_mAP) / len(mean_mAP)
+    print(colored(f"ONNX Test \t loss: {avg_loss:3.10f} \t mAP: {avg_mAP:3.10f}", 'cyan')) 
+
+
+    return avg_mAP
+
