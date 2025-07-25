@@ -6,6 +6,8 @@ from termcolor import colored
 from utils import get_bboxes_training, mean_average_precision
 import onnxruntime
 import torch
+import torch.nn as nn
+
 
 def get_train_transforms():
     return A.Compose([A.OneOf([A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit= 0.2, val_shift_limit=0.2, p=0.9),
@@ -129,5 +131,86 @@ def test_fn_onnx(test_loader, onnx_model_path, loss_fn):
     print(colored(f"ONNX Test \t loss: {avg_loss:3.10f} \t mAP: {avg_mAP:3.10f}", 'cyan')) 
 
 
+    return avg_mAP
+
+def train_fn_with_mse_distillation(train_loader, student_model, teacher_model, optimizer, yolo_loss_fn, epoch):
+    ALPHA = 0.5
+    mean_total_loss = []
+    mean_yolo_loss = []
+    mean_distillation_loss = []
+    mean_mAP = []
+
+    total_batches = len(train_loader)
+    display_interval = total_batches // 5 
+
+    teacher_model.eval()
+    student_model.train()
+
+    distillation_mse_fn = nn.MSELoss(reduction='mean')
+
+    for batch_idx, (x, y) in enumerate(train_loader):
+        x, y = x.to(DEVICE), y.to(DEVICE)
+
+        out = student_model(x)
+
+        with torch.no_grad():
+            teacher_out = teacher_model(x)
+
+        yolo_loss = yolo_loss_fn(out, y)
+        distillation_loss = distillation_mse_fn(out, teacher_out)
+
+        total_loss = ALPHA * yolo_loss + (1 - ALPHA) * distillation_loss
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+
+        pred_boxes, true_boxes = get_bboxes_training(out, y, iou_threshold=0.5, threshold=0.4)
+        mAP = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, box_format="midpoint")
+
+        mean_total_loss.append(total_loss.item())
+        mean_yolo_loss.append(yolo_loss.item())
+        mean_distillation_loss.append(distillation_loss.item())
+        mean_mAP.append(mAP.item())
+
+        if batch_idx % display_interval == 0 or batch_idx == total_batches - 1:
+            print(f"Epoch: {epoch:3} \t Iter: {batch_idx:3}/{total_batches:3} \t Total Loss: {total_loss.item():3.10f} \t YOLO Loss: {yolo_loss.item():3.10f} \t Distill Loss (MSE): {distillation_loss.item():3.10f} \t mAP: {mAP.item():3.10f}")
+
+    avg_total_loss = sum(mean_total_loss) / len(mean_total_loss)
+    avg_yolo_loss = sum(mean_yolo_loss) / len(mean_yolo_loss)
+    avg_distillation_loss = sum(mean_distillation_loss) / len(mean_distillation_loss)
+    avg_mAP = sum(mean_mAP) / len(mean_mAP)
+    print(colored(f"Train \t Avg Total Loss: {avg_total_loss:3.10f} \t Avg YOLO Loss: {avg_yolo_loss:3.10f} \t Avg Distill Loss (MSE): {avg_distillation_loss:3.10f} \t Avg mAP: {avg_mAP:3.10f}", 'green'))
+
+    return avg_mAP
+
+def train_fn_qat(train_loader, model, optimizer, yolo_loss_fn, epoch):
+    mean_loss = []
+    mean_mAP = []
+    total_batches = len(train_loader)
+    display_interval = total_batches // 5
+    model.train()
+
+    for batch_idx, (x, y) in enumerate(train_loader):
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        out = model(x) 
+        loss = yolo_loss_fn(out, y)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        pred_boxes, true_boxes = get_bboxes_training(out, y, iou_threshold=0.5, threshold=0.4)
+        mAP = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, box_format="midpoint")
+
+        mean_loss.append(loss.item())
+        mean_mAP.append(mAP.item())
+
+        if batch_idx % display_interval == 0 or batch_idx == total_batches - 1:
+            print(f"Epoch: {epoch:3} \t Iter: {batch_idx:3}/{total_batches:3} \t Loss: {loss.item():3.10f} \t mAP: {mAP.item():3.10f}")
+
+    avg_loss = sum(mean_loss) / len(mean_loss)
+    avg_mAP = sum(mean_mAP) / len(mean_mAP)
+    print(f"\nTrain (QAT) \t loss: {avg_loss:3.10f} \t mAP: {avg_mAP:3.10f}\n")
     return avg_mAP
 
