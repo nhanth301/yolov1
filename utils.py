@@ -1,8 +1,14 @@
 import numpy as np
 import torch 
+import torch.nn as nn
 from collections import Counter
 from matplotlib import patches
 import matplotlib.pyplot as plt
+from small_model import Yolov1Small, CNNBlock
+from qat_model import Yolov1SmallQAT
+import cv2
+import os
+from natsort import natsorted
 
 def convert_to_yolo_format(target, width, height, class_mapping):
     annotations = target['annotation']['object']
@@ -376,3 +382,107 @@ def plot_image_with_labels(image, ground_truth_boxes, predicted_boxes, class_map
         ax.text(upper_left_x * width, upper_left_y * height, class_name, color='white', fontsize=12, bbox=dict(facecolor='red', alpha=0.2))
 
     plt.show()
+
+
+
+def fuse_original_model_for_qat(model):
+    if hasattr(model, 'darknet') and isinstance(model.darknet, nn.Sequential):
+        for i, sub_module in enumerate(model.darknet):
+            if isinstance(sub_module, CNNBlock):
+                torch.quantization.fuse_modules(sub_module, ['conv', 'batchnorm'], inplace=True)
+    return model
+
+def load_quantized_model_for_inference(
+    path_to_quantized_state_dict: str,
+    model_kwargs: dict,
+    qconfig_backend: str = 'fbgemm' 
+):
+    original_yolov1_small = Yolov1Small(**model_kwargs)
+    original_yolov1_small.eval()
+    
+    fused_original_model = fuse_original_model_for_qat(original_yolov1_small)
+    qat_model = Yolov1SmallQAT(fused_original_model)
+    qat_model.qconfig = torch.quantization.get_default_qconfig(qconfig_backend)
+    torch.quantization.prepare_qat(qat_model, inplace=True)
+    
+
+    print("Attempting to load the fully quantized model...")
+
+    qat_model.eval() 
+    qat_model_cpu = qat_model.to('cpu')
+    converted_model_structure = torch.quantization.convert(qat_model_cpu, inplace=False)
+    converted_model_structure.load_state_dict(
+        torch.load(path_to_quantized_state_dict, map_location='cpu')
+    )
+    print(f"Successfully loaded fully quantized model from {path_to_quantized_state_dict}")
+    
+    converted_model_structure.eval()
+    return converted_model_structure
+
+def export_qat2onnx(qat_model, onnx_path, input_shape=(1, 3, 448, 448)):
+    dummy_input_export = torch.randn(input_shape).to('cpu')
+    torch.onnx.export(qat_model,
+                      dummy_input_export,
+                      onnx_path,
+                      opset_version=13, 
+                      input_names=['input'],
+                      output_names=['output'],
+                      dynamic_axes={'input' : {0 : 'batch_size'}, 'output' : {0 : 'batch_size'}}
+                     )
+    print(f"Quantized model exported to {onnx_path}")
+
+
+def create_video_from_images(image_folder, output_path='video/output_video.mp4', fps=30):
+    images = [f for f in os.listdir(image_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    images = natsorted(images)
+
+    if not images:
+        return
+
+    first_path = os.path.join(image_folder, images[0])
+    frame = cv2.imread(first_path)
+    if frame is None:
+        return
+
+    height, width, _ = frame.shape
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    count = 0
+    for img in images:
+        img_path = os.path.join(image_folder, img)
+        frame = cv2.imread(img_path)
+        if frame is None:
+            continue
+        frame = cv2.resize(frame, (width, height))
+        out.write(frame)
+        count += 1
+
+    out.release()
+
+def plot_single_frame_with_boxes(frame, boxes, class_mapping):
+    CLASS_NAMES = [None] * len(class_mapping)
+    for name, idx in class_mapping.items():
+        CLASS_NAMES[idx] = name
+    h, w, _ = frame.shape
+    for box in boxes:
+        class_pred = int(box[0])
+        prob = box[1]
+        x, y, bw, bh = box[2], box[3], box[4], box[5]
+        
+        x1 = int((x - bw / 2) * w)
+        y1 = int((y - bh / 2) * h)
+        x2 = int((x + bw / 2) * w)
+        y2 = int((y + bh / 2) * h)
+        
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+        label = f"{CLASS_NAMES[class_pred]}: {prob:.2f}"
+        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, (0, 255, 0), 1, cv2.LINE_AA)
+    return frame
+
+if __name__ == '__main__':
+    create_video_from_images('data2007/VOCdevkit/VOC2007/JPEGImages')
